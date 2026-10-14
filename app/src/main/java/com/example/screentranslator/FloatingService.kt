@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -20,6 +21,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Base64
 import android.util.DisplayMetrics
+import android.util.TypedValue
 import android.view.*
 import android.widget.*
 import androidx.core.app.NotificationCompat
@@ -34,6 +36,7 @@ class FloatingService : Service() {
     private var floatingBubble: View? = null
     private var selectionOverlay: View? = null
     private var resultDialogView: View? = null
+    private var inPlaceOverlayView: FrameLayout? = null
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -56,7 +59,7 @@ class FloatingService : Service() {
         }
 
         if (resultCode != 0 && data != null && mediaProjection == null) {
-            setupMediaProjection(resultCode, data)
+            initMediaProjectionToken(resultCode, data)
         }
 
         if (floatingBubble == null) {
@@ -79,26 +82,32 @@ class FloatingService : Service() {
         }
 
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("مترجم شناور فعال است")
-            .setContentText("ضربه: انتخاب کادر | نگه‌داشتن حباب: ترجمه کل صفحه")
+            .setContentTitle("مترجم شناور آماده است")
+            .setContentText("ضربه: انتخاب کادر یا ترجمه درجای صفحه")
             .setSmallIcon(android.R.drawable.ic_menu_crop)
             .build()
 
         startForeground(1, notification)
     }
 
-    private fun setupMediaProjection(resultCode: Int, data: Intent) {
+    // فقط توکن را نگه می‌دارد و VirtualDisplay را در لحظه نیاز می‌سازد تا کروم قفل نشود
+    private fun initMediaProjectionToken(resultCode: Int, data: Intent) {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpManager.getMediaProjection(resultCode, data)
 
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
                 super.onStop()
-                virtualDisplay?.release()
-                imageReader?.close()
+                releaseVirtualDisplay()
             }
         }, Handler(Looper.getMainLooper()))
 
+        updateMetrics()
+        // ساخت اولیه سطح تصویر
+        ensureVirtualDisplayReady()
+    }
+
+    private fun updateMetrics() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
@@ -106,7 +115,11 @@ class FloatingService : Service() {
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
         screenDensity = metrics.densityDpi
+    }
 
+    private fun ensureVirtualDisplayReady() {
+        if (virtualDisplay != null && imageReader != null) return
+        updateMetrics()
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenTranslatorDisplay",
@@ -118,6 +131,13 @@ class FloatingService : Service() {
             null,
             null
         )
+    }
+
+    private fun releaseVirtualDisplay() {
+        virtualDisplay?.release()
+        virtualDisplay = null
+        imageReader?.close()
+        imageReader = null
     }
 
     private fun getOverlayFlag(): Int {
@@ -133,16 +153,21 @@ class FloatingService : Service() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         floatingBubble = LayoutInflater.from(this).inflate(R.layout.layout_floating_bubble, null)
 
+        // فلگ‌های غیرمزاحم تا کروم و کیبورد به هیچ وجه مسدود نشوند
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             getOverlayFlag(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 30
-            y = 300
+            x = 20
+            y = 400
+            // جلوگیری از حساسیت امنیتی کروم روی اندروید 12+
+            alpha = 0.95f
         }
 
         windowManager.addView(floatingBubble, params)
@@ -153,11 +178,7 @@ class FloatingService : Service() {
 
         val longPressRunnable = Runnable {
             isLongPressTriggered = true
-            Toast.makeText(this@FloatingService, "✨ در حال ترجمه کل صفحه...", Toast.LENGTH_SHORT).show()
-            floatingBubble?.visibility = View.GONE
-            Handler(Looper.getMainLooper()).postDelayed({
-                captureScreenArea(0, 0, screenWidth, screenHeight)
-            }, 150)
+            startInPlaceFullPageTranslation()
         }
 
         bubbleIcon?.setOnTouchListener(object : View.OnTouchListener {
@@ -176,8 +197,7 @@ class FloatingService : Service() {
                         initialTouchY = event.rawY
                         isClick = true
                         isLongPressTriggered = false
-                        // اگر 550 میلی‌ثانیه نگه داشته شود، مستقیم کل صفحه ترجمه می‌شود
-                        longPressHandler.postDelayed(longPressRunnable, 550)
+                        longPressHandler.postDelayed(longPressRunnable, 500)
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -197,7 +217,12 @@ class FloatingService : Service() {
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         longPressHandler.removeCallbacks(longPressRunnable)
                         if (isClick && !isLongPressTriggered) {
-                            showCropOverlay()
+                            // اگر لایه ترجمه درجا روی صفحه باز است، با زدن روی حباب پاکش کن
+                            if (inPlaceOverlayView != null) {
+                                removeInPlaceOverlay()
+                            } else {
+                                showCropOverlay()
+                            }
                         }
                         return true
                     }
@@ -209,24 +234,24 @@ class FloatingService : Service() {
 
     private fun showCropOverlay() {
         if (selectionOverlay != null) return
+        removeInPlaceOverlay()
         floatingBubble?.visibility = View.GONE
 
         selectionOverlay = LayoutInflater.from(this).inflate(R.layout.activity_capture, null)
         val cropBox = selectionOverlay!!.findViewById<View>(R.id.cropBox)
         val overlayRoot = selectionOverlay!!.findViewById<FrameLayout>(R.id.overlayRoot)
 
-        // پنل دکمه‌های بالای صفحه (ترجمه کل صفحه + انصراف)
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(24, 24, 24, 24)
+            setPadding(20, 20, 20, 20)
         }
 
-        val btnFullPage = Button(this).apply {
-            text = "✨ ترجمه کل صفحه"
+        val btnFullPageInPlace = Button(this).apply {
+            text = "✨ ترجمه درجای کل صفحه (In-Place)"
             setTextColor(Color.WHITE)
-            textSize = 14f
-            setPadding(45, 20, 45, 20)
+            textSize = 13f
+            setPadding(40, 20, 40, 20)
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#0284C7"))
                 cornerRadius = 50f
@@ -234,14 +259,12 @@ class FloatingService : Service() {
             }
             setOnClickListener {
                 removeCropOverlay()
-                Handler(Looper.getMainLooper()).postDelayed({
-                    captureScreenArea(0, 0, screenWidth, screenHeight)
-                }, 150)
+                startInPlaceFullPageTranslation()
             }
         }
 
         val btnCancel = Button(this).apply {
-            text = "✖ انصراف"
+            text = "✖ بستن"
             setTextColor(Color.WHITE)
             textSize = 13f
             setPadding(35, 20, 35, 20)
@@ -250,13 +273,11 @@ class FloatingService : Service() {
                 cornerRadius = 50f
                 setStroke(2, Color.parseColor("#64748B"))
             }
-            val marginParams = LinearLayout.LayoutParams(
+            layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = 24
-            }
-            layoutParams = marginParams
+            ).apply { marginEnd = 20 }
+
             setOnClickListener {
                 removeCropOverlay()
                 floatingBubble?.visibility = View.VISIBLE
@@ -264,32 +285,14 @@ class FloatingService : Service() {
         }
 
         topBar.addView(btnCancel)
-        topBar.addView(btnFullPage)
+        topBar.addView(btnFullPageInPlace)
 
         val topBarParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        ).apply {
-            topMargin = 90
-        }
+        ).apply { topMargin = 90 }
         overlayRoot.addView(topBar, topBarParams)
-
-        // راهنمای پایین دکمه‌ها
-        val hintText = TextView(this).apply {
-            text = "یا دور متن دلخواه کادر بکشید"
-            setTextColor(Color.parseColor("#E2E8F0"))
-            textSize = 12f
-            gravity = Gravity.CENTER
-        }
-        val hintParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        ).apply {
-            topMargin = 245
-        }
-        overlayRoot.addView(hintText, hintParams)
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -333,16 +336,12 @@ class FloatingService : Service() {
                     val finalW = cropBox.layoutParams.width
                     val finalH = cropBox.layoutParams.height
 
-                    removeCropOverlay()
-
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (finalW > 40 && finalH > 40) {
+                    if (finalW > 40 && finalH > 40) {
+                        removeCropOverlay()
+                        Handler(Looper.getMainLooper()).postDelayed({
                             captureScreenArea(finalX, finalY, finalW, finalH)
-                        } else {
-                            // اگر فقط ضربه زد، کل صفحه ترجمه شود
-                            captureScreenArea(0, 0, screenWidth, screenHeight)
-                        }
-                    }, 150)
+                        }, 150)
+                    }
                     true
                 }
                 else -> false
@@ -357,8 +356,155 @@ class FloatingService : Service() {
         }
     }
 
+    // اجرای ترجمه درجای کل صفحه (مانند Google Lens)
+    private fun startInPlaceFullPageTranslation() {
+        removeInPlaceOverlay()
+        floatingBubble?.visibility = View.GONE
+        Toast.makeText(this, "⏳ در حال اسکن و ترجمه درجای صفحه...", Toast.LENGTH_SHORT).show()
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            val base64 = captureFullScreenBase64()
+            floatingBubble?.visibility = View.VISIBLE
+
+            if (base64 == null) {
+                Toast.makeText(this, "خطا در ثبت تصویر صفحه، دوباره تلاش کنید", Toast.LENGTH_SHORT).show()
+                return@postDelayed
+            }
+
+            val apiKey = getSharedPreferences("app_prefs", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+
+            CoroutineScope(Dispatchers.Main).launch {
+                val res = GeminiHelper.translateFullPageInPlace(base64, apiKey)
+                res.onSuccess { blocks ->
+                    if (blocks.isEmpty()) {
+                        Toast.makeText(this@FloatingService, "متنی در صفحه پیدا نشد", Toast.LENGTH_SHORT).show()
+                    } else {
+                        renderInPlaceBlocksOnScreen(blocks)
+                    }
+                }.onFailure { err ->
+                    Toast.makeText(this@FloatingService, "خطا: ${err.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }, 180)
+    }
+
+    // رسم باکس‌های ترجمه دقیقاً روی مختصات متون اصلی صفحه
+    private fun renderInPlaceBlocksOnScreen(blocks: List<InPlaceTextBlock>) {
+        removeInPlaceOverlay()
+
+        inPlaceOverlayView = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#1A000000"))
+        }
+
+        for (block in blocks) {
+            val left = (block.xmin / 1000f * screenWidth).toInt()
+            val top = (block.ymin / 1000f * screenHeight).toInt()
+            val right = (block.xmax / 1000f * screenWidth).toInt()
+            val bottom = (block.ymax / 1000f * screenHeight).toInt()
+
+            val width = Math.max(80, right - left)
+            val height = Math.max(40, bottom - top)
+
+            val textCard = TextView(this).apply {
+                text = block.text
+                setTextColor(Color.parseColor("#F8FAFC"))
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER_VERTICAL or Gravity.RIGHT
+                textDirection = View.TEXT_DIRECTION_RTL
+                setPadding(16, 8, 16, 8)
+
+                // تنظیم خودکار سایز فونت متناسب با کادر
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#F21E293B")) // پوشش کامل روی متن انگلیسی زیرین
+                    cornerRadius = 12f
+                    setStroke(2, Color.parseColor("#38BDF8"))
+                }
+            }
+
+            val lp = FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = left
+                topMargin = top
+                minHeight = height
+            }
+
+            inPlaceOverlayView!!.addView(textCard, lp)
+        }
+
+        // دکمه شناور بالا برای بستن لایه ترجمه درجا و ادامه اسکرول صفحه
+        val closeBanner = Button(this).apply {
+            text = "✖ پاک کردن ترجمه‌های روی صفحه (یا ضربه روی حباب)"
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setPadding(40, 18, 40, 18)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#E11D48"))
+                cornerRadius = 50f
+                setStroke(3, Color.WHITE)
+            }
+            setOnClickListener {
+                removeInPlaceOverlay()
+            }
+        }
+
+        val bannerParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        ).apply { topMargin = 85 }
+
+        inPlaceOverlayView!!.addView(closeBanner, bannerParams)
+
+        val overlayParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            getOverlayFlag(),
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        )
+
+        windowManager.addView(inPlaceOverlayView, overlayParams)
+    }
+
+    private fun removeInPlaceOverlay() {
+        inPlaceOverlayView?.let {
+            windowManager.removeView(it)
+            inPlaceOverlayView = null
+        }
+    }
+
+    private fun captureFullScreenBase64(): String? {
+        return try {
+            ensureVirtualDisplayReady()
+            val image = imageReader?.acquireLatestImage() ?: return null
+
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * screenWidth
+
+            val fullBitmap = Bitmap.createBitmap(
+                screenWidth + rowPadding / pixelStride,
+                screenHeight,
+                Bitmap.Config.ARGB_8888
+            )
+            fullBitmap.copyPixelsFromBuffer(buffer)
+            image.close()
+
+            val exactScreen = Bitmap.createBitmap(fullBitmap, 0, 0, screenWidth, screenHeight)
+            val stream = ByteArrayOutputStream()
+            exactScreen.compress(Bitmap.CompressFormat.JPEG, 75, stream)
+            Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun captureScreenArea(x: Int, y: Int, width: Int, height: Int) {
         try {
+            ensureVirtualDisplayReady()
             val image = imageReader?.acquireLatestImage()
             if (image == null) {
                 floatingBubble?.visibility = View.VISIBLE
@@ -456,7 +602,8 @@ class FloatingService : Service() {
         floatingBubble?.let { windowManager.removeView(it) }
         removeCropOverlay()
         removeResultCard()
-        virtualDisplay?.release()
+        removeInPlaceOverlay()
+        releaseVirtualDisplay()
         mediaProjection?.stop()
     }
 }
