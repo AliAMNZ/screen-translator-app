@@ -22,11 +22,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".CaptureActivity"
-            android:theme="@style/Theme.AppCompat.Translucent.NoTitleBar"
-            android:exported="false" />
-
         <service
             android:name=".FloatingService"
             android:foregroundServiceType="mediaProjection"
