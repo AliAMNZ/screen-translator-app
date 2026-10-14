@@ -25,10 +25,13 @@ jobs:
           gradle-version: '8.5'
           cache-disabled: true
 
-      - name: Accept Android SDK Licenses & Build APK
+      - name: Create gradle.properties & Build APK
         run: |
+          echo "org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8" > gradle.properties
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "kotlin.code.style=official" >> gradle.properties
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          gradle assembleDebug --no-daemon --stacktrace
+          gradle assembleDebug --no-daemon
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
