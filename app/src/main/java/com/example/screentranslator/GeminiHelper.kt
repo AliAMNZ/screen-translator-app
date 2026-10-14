@@ -17,17 +17,24 @@ object GeminiHelper {
         .readTimeout(35, TimeUnit.SECONDS)
         .build()
 
+    // لیست مدل‌های روز بر اساس اولویت (مدل اصلی: 3.5 Flash-Lite)
     private val MODELS = listOf(
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash"
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-2.5-flash"
     )
 
     suspend fun translateImage(base64Image: String, apiKey: String): Result<String> = withContext(Dispatchers.IO) {
+        val cleanKey = apiKey.trim()
+        if (cleanKey.isEmpty()) {
+            return@withContext Result.failure(Exception("کلید API خالی است."))
+        }
+
         val prompt = """
             نقش شما یک مترجم محاوره‌ای و بسیار خودمونی است. متن انگلیسی این تصویر را بخوان و آن را به فارسی کاملاً روان، طبیعی و محاوره‌ای (خودمونی) ترجمه کن.
-            اصطلاحات تخصصی کامپیوتر و مفاهیم فنی را دقیق منتقل کن.
-            تمام افعال حتماً شکسته و گفتاری باشند (مثلاً می‌شه، می‌کنه، داری، رو به جای را).
+            اصطلاحات تخصصی را دقیق و طبیعی منتقل کن.
+            تمام افعال حتماً شکسته و گفتاری باشند (مثلاً: می‌شه، می‌کنه، داری، می‌گه، رو به جای را).
             فقط و فقط متن ترجمه نهایی را بفرست و هیچ مقدمه، توضیح اضافی یا عنوانی ننویس.
         """.trimIndent()
 
@@ -49,11 +56,11 @@ object GeminiHelper {
             put("generationConfig", JSONObject().put("temperature", 0.4))
         }
 
-        var lastError = "خطای نامشخص"
+        val errorLogs = mutableListOf<String>()
 
         for (model in MODELS) {
             try {
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$cleanKey"
                 val request = Request.Builder()
                     .url(url)
                     .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
@@ -63,7 +70,12 @@ object GeminiHelper {
                 val responseString = response.body?.string() ?: ""
 
                 if (!response.isSuccessful) {
-                    lastError = "کد خطا ${response.code} در مدل $model"
+                    val errMsg = try {
+                        JSONObject(responseString).getJSONObject("error").getString("message")
+                    } catch (e: Exception) {
+                        "HTTP ${response.code}"
+                    }
+                    errorLogs.add("$model: $errMsg")
                     continue
                 }
 
@@ -77,10 +89,10 @@ object GeminiHelper {
 
                 return@withContext Result.success(output.trim())
             } catch (e: Exception) {
-                lastError = e.message ?: "خطای شبکه"
+                errorLogs.add("$model: ${e.message}")
             }
         }
 
-        Result.failure(Exception(lastError))
+        Result.failure(Exception(errorLogs.joinToString("\n")))
     }
 }
