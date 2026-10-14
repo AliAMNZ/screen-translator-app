@@ -83,14 +83,13 @@ class FloatingService : Service() {
 
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("مترجم شناور آماده است")
-            .setContentText("ضربه: انتخاب کادر یا ترجمه درجای صفحه")
+            .setContentText("ضربه: انتخاب کادر | نگه‌داشتن: ترجمه درجای صفحه")
             .setSmallIcon(android.R.drawable.ic_menu_crop)
             .build()
 
         startForeground(1, notification)
     }
 
-    // فقط توکن را نگه می‌دارد و VirtualDisplay را در لحظه نیاز می‌سازد تا کروم قفل نشود
     private fun initMediaProjectionToken(resultCode: Int, data: Intent) {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpManager.getMediaProjection(resultCode, data)
@@ -103,7 +102,6 @@ class FloatingService : Service() {
         }, Handler(Looper.getMainLooper()))
 
         updateMetrics()
-        // ساخت اولیه سطح تصویر
         ensureVirtualDisplayReady()
     }
 
@@ -153,7 +151,6 @@ class FloatingService : Service() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         floatingBubble = LayoutInflater.from(this).inflate(R.layout.layout_floating_bubble, null)
 
-        // فلگ‌های غیرمزاحم تا کروم و کیبورد به هیچ وجه مسدود نشوند
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -166,7 +163,6 @@ class FloatingService : Service() {
             gravity = Gravity.TOP or Gravity.START
             x = 20
             y = 400
-            // جلوگیری از حساسیت امنیتی کروم روی اندروید 12+
             alpha = 0.95f
         }
 
@@ -217,7 +213,6 @@ class FloatingService : Service() {
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         longPressHandler.removeCallbacks(longPressRunnable)
                         if (isClick && !isLongPressTriggered) {
-                            // اگر لایه ترجمه درجا روی صفحه باز است، با زدن روی حباب پاکش کن
                             if (inPlaceOverlayView != null) {
                                 removeInPlaceOverlay()
                             } else {
@@ -356,7 +351,6 @@ class FloatingService : Service() {
         }
     }
 
-    // اجرای ترجمه درجای کل صفحه (مانند Google Lens)
     private fun startInPlaceFullPageTranslation() {
         removeInPlaceOverlay()
         floatingBubble?.visibility = View.GONE
@@ -388,7 +382,6 @@ class FloatingService : Service() {
         }, 180)
     }
 
-    // رسم باکس‌های ترجمه دقیقاً روی مختصات متون اصلی صفحه
     private fun renderInPlaceBlocksOnScreen(blocks: List<InPlaceTextBlock>) {
         removeInPlaceOverlay()
 
@@ -412,12 +405,11 @@ class FloatingService : Service() {
                 gravity = Gravity.CENTER_VERTICAL or Gravity.RIGHT
                 textDirection = View.TEXT_DIRECTION_RTL
                 setPadding(16, 8, 16, 8)
-
-                // تنظیم خودکار سایز فونت متناسب با کادر
+                minHeight = height
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
 
                 background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#F21E293B")) // پوشش کامل روی متن انگلیسی زیرین
+                    setColor(Color.parseColor("#F21E293B"))
                     cornerRadius = 12f
                     setStroke(2, Color.parseColor("#38BDF8"))
                 }
@@ -426,13 +418,11 @@ class FloatingService : Service() {
             val lp = FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 leftMargin = left
                 topMargin = top
-                minHeight = height
             }
 
             inPlaceOverlayView!!.addView(textCard, lp)
         }
 
-        // دکمه شناور بالا برای بستن لایه ترجمه درجا و ادامه اسکرول صفحه
         val closeBanner = Button(this).apply {
             text = "✖ پاک کردن ترجمه‌های روی صفحه (یا ضربه روی حباب)"
             setTextColor(Color.WHITE)
