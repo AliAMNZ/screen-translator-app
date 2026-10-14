@@ -19,18 +19,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Setup Gradle 8.5
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.5'
           cache-disabled: true
 
-      - name: Build Debug APK
+      - name: Accept Android SDK Licenses & Build APK
         run: |
-          yes | sdkmanager --licenses || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
           gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK Artifact
