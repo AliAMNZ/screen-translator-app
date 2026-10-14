@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -79,7 +80,7 @@ class FloatingService : Service() {
 
         val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("مترجم شناور فعال است")
-            .setContentText("روی حباب آبی بزنید و دور متن کادر بکشید")
+            .setContentText("ضربه: انتخاب کادر | نگه‌داشتن حباب: ترجمه کل صفحه")
             .setSmallIcon(android.R.drawable.ic_menu_crop)
             .build()
 
@@ -90,7 +91,6 @@ class FloatingService : Service() {
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mpManager.getMediaProjection(resultCode, data)
 
-        // ثبت Callback الزامی برای اندروید 14 به بالا
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
                 super.onStop()
@@ -148,6 +148,17 @@ class FloatingService : Service() {
         windowManager.addView(floatingBubble, params)
 
         val bubbleIcon = floatingBubble?.findViewById<ImageView>(R.id.imgBubble)
+        val longPressHandler = Handler(Looper.getMainLooper())
+        var isLongPressTriggered = false
+
+        val longPressRunnable = Runnable {
+            isLongPressTriggered = true
+            Toast.makeText(this@FloatingService, "✨ در حال ترجمه کل صفحه...", Toast.LENGTH_SHORT).show()
+            floatingBubble?.visibility = View.GONE
+            Handler(Looper.getMainLooper()).postDelayed({
+                captureScreenArea(0, 0, screenWidth, screenHeight)
+            }, 150)
+        }
 
         bubbleIcon?.setOnTouchListener(object : View.OnTouchListener {
             private var initialX = 0
@@ -164,6 +175,9 @@ class FloatingService : Service() {
                         initialTouchX = event.rawX
                         initialTouchY = event.rawY
                         isClick = true
+                        isLongPressTriggered = false
+                        // اگر 550 میلی‌ثانیه نگه داشته شود، مستقیم کل صفحه ترجمه می‌شود
+                        longPressHandler.postDelayed(longPressRunnable, 550)
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -171,15 +185,18 @@ class FloatingService : Service() {
                         val dy = (event.rawY - initialTouchY).toInt()
                         if (Math.abs(dx) > 15 || Math.abs(dy) > 15) {
                             isClick = false
+                            longPressHandler.removeCallbacks(longPressRunnable)
                         }
-                        params.x = initialX + dx
-                        params.y = initialY + dy
-                        windowManager.updateViewLayout(floatingBubble, params)
+                        if (!isLongPressTriggered) {
+                            params.x = initialX + dx
+                            params.y = initialY + dy
+                            windowManager.updateViewLayout(floatingBubble, params)
+                        }
                         return true
                     }
-                    MotionEvent.ACTION_UP -> {
-                        if (isClick) {
-                            // وقتی کاربر روی دایره کلیک کرد، صفحه انتخاب کادر باز شود
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        longPressHandler.removeCallbacks(longPressRunnable)
+                        if (isClick && !isLongPressTriggered) {
                             showCropOverlay()
                         }
                         return true
@@ -198,20 +215,80 @@ class FloatingService : Service() {
         val cropBox = selectionOverlay!!.findViewById<View>(R.id.cropBox)
         val overlayRoot = selectionOverlay!!.findViewById<FrameLayout>(R.id.overlayRoot)
 
-        // افزودن راهنمای متنی بالای صفحه
-        val hintText = TextView(this).apply {
-            text = "دور متن مورد نظر کادر بکشید (یا یک ضربه بزنید تا کل صفحه ترجمه شود)"
+        // پنل دکمه‌های بالای صفحه (ترجمه کل صفحه + انصراف)
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(24, 24, 24, 24)
+        }
+
+        val btnFullPage = Button(this).apply {
+            text = "✨ ترجمه کل صفحه"
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#CC0F172A"))
-            setPadding(32, 16, 32, 16)
+            textSize = 14f
+            setPadding(45, 20, 45, 20)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#0284C7"))
+                cornerRadius = 50f
+                setStroke(3, Color.WHITE)
+            }
+            setOnClickListener {
+                removeCropOverlay()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    captureScreenArea(0, 0, screenWidth, screenHeight)
+                }, 150)
+            }
+        }
+
+        val btnCancel = Button(this).apply {
+            text = "✖ انصراف"
+            setTextColor(Color.WHITE)
             textSize = 13f
+            setPadding(35, 20, 35, 20)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#CC1E293B"))
+                cornerRadius = 50f
+                setStroke(2, Color.parseColor("#64748B"))
+            }
+            val marginParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = 24
+            }
+            layoutParams = marginParams
+            setOnClickListener {
+                removeCropOverlay()
+                floatingBubble?.visibility = View.VISIBLE
+            }
+        }
+
+        topBar.addView(btnCancel)
+        topBar.addView(btnFullPage)
+
+        val topBarParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        ).apply {
+            topMargin = 90
+        }
+        overlayRoot.addView(topBar, topBarParams)
+
+        // راهنمای پایین دکمه‌ها
+        val hintText = TextView(this).apply {
+            text = "یا دور متن دلخواه کادر بکشید"
+            setTextColor(Color.parseColor("#E2E8F0"))
+            textSize = 12f
             gravity = Gravity.CENTER
         }
         val hintParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        ).apply { topMargin = 80 }
+        ).apply {
+            topMargin = 245
+        }
         overlayRoot.addView(hintText, hintParams)
 
         val params = WindowManager.LayoutParams(
@@ -258,15 +335,14 @@ class FloatingService : Service() {
 
                     removeCropOverlay()
 
-                    // کمی مکث تا لایه آبی محو شود و عکس تمیز از صفحه گرفته شود
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (finalW > 40 && finalH > 40) {
                             captureScreenArea(finalX, finalY, finalW, finalH)
                         } else {
-                            // اگر کاربر فقط یک ضربه زد، کل صفحه را ترجمه کن
+                            // اگر فقط ضربه زد، کل صفحه ترجمه شود
                             captureScreenArea(0, 0, screenWidth, screenHeight)
                         }
-                    }, 120)
+                    }, 150)
                     true
                 }
                 else -> false
@@ -286,7 +362,7 @@ class FloatingService : Service() {
             val image = imageReader?.acquireLatestImage()
             if (image == null) {
                 floatingBubble?.visibility = View.VISIBLE
-                Toast.makeText(this, "تصویر آماده نشد، دوباره روی حباب بزنید", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "تصویر آماده نشد، دوباره تلاش کنید", Toast.LENGTH_SHORT).show()
                 return
             }
 
@@ -333,7 +409,7 @@ class FloatingService : Service() {
         val btnClose = resultDialogView!!.findViewById<Button>(R.id.btnClose)
 
         val params = WindowManager.LayoutParams(
-            (screenWidth * 0.9).toInt(),
+            (screenWidth * 0.92).toInt(),
             WindowManager.LayoutParams.WRAP_CONTENT,
             getOverlayFlag(),
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
